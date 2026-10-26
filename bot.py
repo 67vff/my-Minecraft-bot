@@ -64,6 +64,7 @@ def get_conn():
 def init_db():
     c = get_conn(); cur = c.cursor()
     cur.execute("PRAGMA journal_mode=WAL")
+    cur.execute("PRAGMA synchronous=NORMAL")
     cur.execute("""CREATE TABLE IF NOT EXISTS players (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         game_nick TEXT UNIQUE,
@@ -214,7 +215,8 @@ def check_subscription(user_id):
         try:
             member = bot.get_chat_member(chat_id, user_id)
             results[name] = member.status in ('creator', 'administrator', 'member')
-        except Exception:
+        except Exception as e:
+            print(f"[SUB] {name} error: {e}", flush=True)
             results[name] = False
     return results
 
@@ -281,23 +283,24 @@ def giga_token():
             if t:
                 _giga["t"] = t; _giga["e"] = now + 1800; return t
         except Exception as e:
-            print(f"[GIGA] {e}")
+            print(f"[GIGA] token error: {e}", flush=True)
     return None
 
 
 def ai_ask(prompt):
     tok = giga_token()
     if not tok:
-        return "⚠️ ИИ временно недоступен."
+        return "⚠️ ИИ временно недоступен (нет токена)."
     try:
         r = requests.post("https://api.giga.chat/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
             json={"model": "GigaChat-2", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300},
             verify=False, timeout=30)
-        print(f"[AI] {r.status_code}: {r.text[:300]}", flush=True)
+        print(f"[AI] {r.status_code}: {r.text[:200]}", flush=True)
         data = r.json()
         return data.get("choices", [{}])[0].get("message", {}).get("content", "Нет ответа")
     except Exception as e:
+        print(f"[AI] exception: {e}", flush=True)
         return f"⚠️ Ошибка ИИ: {e}"
 
 
@@ -351,7 +354,7 @@ def cmd_help(message):
 def cmd_me(message):
     p = get_player_by_tg(message.from_user.id)
     if not p:
-        bot.reply_to(message, "❌ Ты не зарегистрирован.")
+        bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
         return
     perms = get_permissions(p[0])
     perm_text = "\n".join([f"{'✅' if perms.get(k, 0) else '❌'} {v}" for k, v in PERMISSIONS])
@@ -384,7 +387,7 @@ def cmd_ai(message):
         return
     p = get_player_by_tg(message.from_user.id)
     if not p:
-        bot.reply_to(message, "❌ Ты не зарегистрирован. Попроси админа добавить тебя.")
+        bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
         return
     if p[9]:
         bot.reply_to(message, "🔇 Ты заглушён, не можешь использовать /ai.")
