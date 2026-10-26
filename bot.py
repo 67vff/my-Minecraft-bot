@@ -12,6 +12,8 @@ ADMIN_ID = int(os.getenv('ADMIN_ID', '8000630493'))
 GIGACHAT_AUTH_KEY = os.getenv('GIGACHAT_AUTH_KEY')
 CHANNEL_ID = os.getenv('CHANNEL_ID')
 CHAT_ID = os.getenv('CHAT_ID')
+CHANNEL_LINK = os.getenv('CHANNEL_LINK', '')
+CHAT_LINK = os.getenv('CHAT_LINK', '')
 
 CLAN_NAME = "Мой клан"
 POST_LIMIT = 5
@@ -43,6 +45,8 @@ print(f"[CONFIG] BOT_TOKEN: {'OK' if BOT_TOKEN else 'MISSING!'}", flush=True)
 print(f"[CONFIG] GIGACHAT: {'OK' if GIGACHAT_AUTH_KEY else 'MISSING'}", flush=True)
 print(f"[CONFIG] CHANNEL_ID: {CHANNEL_ID or 'MISSING'}", flush=True)
 print(f"[CONFIG] CHAT_ID: {CHAT_ID or 'MISSING'}", flush=True)
+print(f"[CONFIG] CHANNEL_LINK: {'OK' if CHANNEL_LINK else 'MISSING'}", flush=True)
+print(f"[CONFIG] CHAT_LINK: {'OK' if CHAT_LINK else 'MISSING'}", flush=True)
 print(f"[CONFIG] ADMIN_ID: {ADMIN_ID}", flush=True)
 
 
@@ -198,6 +202,64 @@ ensure_admin_player()
 
 
 # ============================================================
+# ПРОВЕРКА ПОДПИСКИ
+# ============================================================
+
+def check_subscription(user_id):
+    results = {}
+    for name, chat_id in [("channel", CHANNEL_ID), ("chat", CHAT_ID)]:
+        if not chat_id:
+            results[name] = True
+            continue
+        try:
+            member = bot.get_chat_member(chat_id, user_id)
+            results[name] = member.status in ('creator', 'administrator', 'member')
+        except Exception:
+            results[name] = False
+    return results
+
+
+def send_subscription_gate(chat_id, user_id):
+    subs = check_subscription(user_id)
+    missing = []
+    if not subs.get("channel"):
+        missing.append("📺 канал")
+    if not subs.get("chat"):
+        missing.append("💬 чат")
+
+    if not missing:
+        show_main_menu(chat_id)
+        return
+
+    m = telebot.types.InlineKeyboardMarkup()
+    if not subs.get("channel") and CHANNEL_LINK:
+        m.add(telebot.types.InlineKeyboardButton("📺 Подписаться на канал", url=CHANNEL_LINK))
+    if not subs.get("chat") and CHAT_LINK:
+        m.add(telebot.types.InlineKeyboardButton("💬 Вступить в чат", url=CHAT_LINK))
+    m.add(telebot.types.InlineKeyboardButton("✅ Я подписался", callback_data="check_subs"))
+
+    bot.send_message(chat_id,
+        f"⚠️ <b>Для доступа нужно подписаться:</b>\n\n"
+        f"Не хватает: {', '.join(missing)}\n\n"
+        f"Нажми кнопки ниже, а потом «✅ Я подписался».",
+        parse_mode='HTML', reply_markup=m)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_subs")
+def cb_check_subs(c):
+    bot.answer_callback_query(c.id)
+    subs = check_subscription(c.from_user.id)
+    if subs.get("channel") and subs.get("chat"):
+        try:
+            bot.delete_message(c.message.chat.id, c.message.message_id)
+        except Exception:
+            pass
+        show_main_menu(c.message.chat.id)
+    else:
+        bot.answer_callback_query(c.id, "❌ Ты ещё не подписался везде!", show_alert=True)
+
+
+# ============================================================
 # GIGACHAT
 # ============================================================
 
@@ -230,9 +292,11 @@ def ai_ask(prompt):
     try:
         r = requests.post("https://api.giga.chat/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
-            json={"model": "GigaChat", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300},
+            json={"model": "GigaChat-2", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300},
             verify=False, timeout=30)
-        return r.json().get("choices", [{}])[0].get("message", {}).get("content", "Нет ответа")
+        print(f"[AI] {r.status_code}: {r.text[:300]}", flush=True)
+        data = r.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "Нет ответа")
     except Exception as e:
         return f"⚠️ Ошибка ИИ: {e}"
 
@@ -248,14 +312,16 @@ def ai_check(text):
     return True, "OK"
 
 
-def send_to_channel(text, photo_id=None):
+def send_to_channel(text, photo_id=None, author=""):
     if not CHANNEL_ID:
         return False, "Канал не настроен"
     try:
+        signature = f"\n\n👤 Отправил: <b>{author}</b>" if author else ""
+        full_text = text + signature
         if photo_id:
-            bot.send_photo(CHANNEL_ID, photo_id, caption=text, parse_mode='HTML')
+            bot.send_photo(CHANNEL_ID, photo_id, caption=full_text, parse_mode='HTML')
         else:
-            bot.send_message(CHANNEL_ID, text, parse_mode='HTML')
+            bot.send_message(CHANNEL_ID, full_text, parse_mode='HTML')
         return True, "OK"
     except Exception as e:
         return False, str(e)
@@ -271,10 +337,10 @@ def cmd_help(message):
         return
     bot.reply_to(message,
         "📋 <b>Команды</b>\n\n"
-        "/ai &lt;вопрос&gt; — спросить ИИ\n"
+        "/ai вопрос — спросить ИИ\n"
         "/ai сколько игроков — кол-во + ники\n"
         "/ai ники — список ников\n"
-        "/ai &lt;ник&gt; репутация — репутация\n"
+        "/ai ник репутация — репутация\n"
         "/me — профиль\n"
         "/clan — список клана\n"
         "/help — справка",
@@ -346,14 +412,14 @@ def cmd_ai(message):
 
 
 # ============================================================
-# РЕГИСТРАЦИЯ В БОТЕ
+# РЕГИСТРАЦИЯ
 # ============================================================
 
 @bot.message_handler(commands=['start'])
 def start(message):
     p = get_player_by_tg(message.from_user.id)
     if p and p[8]:
-        show_main_menu(message.chat.id)
+        send_subscription_gate(message.chat.id, message.from_user.id)
         return
     m = telebot.types.InlineKeyboardMarkup()
     m.add(telebot.types.InlineKeyboardButton("📝 Зарегистрироваться", callback_data="reg"))
@@ -403,7 +469,7 @@ def cb_approve(c):
     bot.answer_callback_query(c.id, "Одобрено")
     try:
         bot.send_message(tg_id, f"✅ Ты зарегистрирован как <b>{nick}</b>!", parse_mode='HTML')
-        show_main_menu(tg_id)
+        send_subscription_gate(tg_id, tg_id)
     except Exception:
         pass
     try:
@@ -631,7 +697,8 @@ def cb_post_menu(c):
     if now - p[11] > POST_WINDOW:
         update_player(p[1], "post_count", 0)
         update_player(p[1], "post_window_start", now)
-    if p[10] >= POST_LIMIT:
+        p = get_player_by_tg(c.from_user.id)
+    if c.from_user.id != ADMIN_ID and p[10] >= POST_LIMIT:
         bot.send_message(c.message.chat.id, f"❌ Лимит: {POST_LIMIT} постов в 5 часов.")
         return
     s = bot.send_message(c.message.chat.id, "📢 Отправь текст поста или фото с подписью:")
@@ -650,12 +717,22 @@ def process_post(message):
     if not ok:
         bot.send_message(message.chat.id, f"❌ ИИ: {r}")
         return
+    if message.from_user.id != ADMIN_ID:
+        now = int(time.time())
+        if now - p[11] > POST_WINDOW:
+            update_player(p[1], "post_count", 0)
+            update_player(p[1], "post_window_start", now)
+            p = get_player_by_tg(message.from_user.id)
+        if p[10] >= POST_LIMIT:
+            bot.send_message(message.chat.id, f"❌ Лимит: {POST_LIMIT} постов в 5 часов.")
+            return
     photo_id = message.photo[-1].file_id if message.photo else None
-    ok2, err = send_to_channel(text, photo_id)
+    ok2, err = send_to_channel(text, photo_id, author=p[1])
     if ok2:
-        update_player(p[1], "post_count", p[10] + 1)
+        if message.from_user.id != ADMIN_ID:
+            update_player(p[1], "post_count", p[10] + 1)
         log_action("post", p[1], text[:100])
-        bot.send_message(message.chat.id, f"✅ Пост опубликован. ({p[10]+1}/{POST_LIMIT})")
+        bot.send_message(message.chat.id, "✅ Пост опубликован.")
         show_main_menu(message.chat.id)
     else:
         bot.send_message(message.chat.id, f"⚠️ Ошибка: {err}")
