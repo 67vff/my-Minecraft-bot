@@ -80,6 +80,12 @@ def init_db():
         post_window_start INTEGER DEFAULT 0,
         created INTEGER
     )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS registered (
+        tg_id INTEGER PRIMARY KEY,
+        game_nick TEXT,
+        tg_username TEXT DEFAULT '',
+        registered_at INTEGER
+    )""")
     cur.execute("""CREATE TABLE IF NOT EXISTS permissions (
         player_id INTEGER, perm TEXT, enabled INTEGER DEFAULT 0,
         PRIMARY KEY (player_id, perm))""")
@@ -105,6 +111,29 @@ def log_action(action, actor="", details=""):
 
 
 # ============================================================
+# РЕГИСТРАЦИЯ (по tg_id)
+# ============================================================
+
+def is_registered(tg_id):
+    c = get_conn(); cur = c.cursor()
+    cur.execute("SELECT game_nick FROM registered WHERE tg_id=?", (tg_id,))
+    r = cur.fetchone(); c.close()
+    return r[0] if r else None
+
+
+def register_tg(tg_id, game_nick, tg_username=""):
+    c = get_conn(); c.cursor().execute(
+        "INSERT OR REPLACE INTO registered (tg_id, game_nick, tg_username, registered_at) VALUES (?, ?, ?, ?)",
+        (tg_id, game_nick, tg_username, int(time.time())))
+    c.commit(); c.close()
+
+
+def unregister_tg(tg_id):
+    c = get_conn(); c.cursor().execute("DELETE FROM registered WHERE tg_id=?", (tg_id,))
+    c.commit(); c.close()
+
+
+# ============================================================
 # ИГРОКИ
 # ============================================================
 
@@ -112,13 +141,6 @@ def get_player_by_nick(nick):
     c = get_conn(); cur = c.cursor()
     cur.execute("""SELECT id, game_nick, tg_id, tg_username, rank, reputation, treasury, notes,
         registered, muted, post_count, post_window_start FROM players WHERE game_nick=?""", (nick,))
-    r = cur.fetchone(); c.close(); return r
-
-
-def get_player_by_tg(tg_id):
-    c = get_conn(); cur = c.cursor()
-    cur.execute("""SELECT id, game_nick, tg_id, tg_username, rank, reputation, treasury, notes,
-        registered, muted, post_count, post_window_start FROM players WHERE tg_id=?""", (tg_id,))
     r = cur.fetchone(); c.close(); return r
 
 
@@ -143,12 +165,14 @@ def register_player(nick, tg_id, tg_username):
 
 def delete_player(nick):
     c = get_conn(); cur = c.cursor()
-    cur.execute("SELECT id FROM players WHERE game_nick=?", (nick,))
+    cur.execute("SELECT id, tg_id FROM players WHERE game_nick=?", (nick,))
     r = cur.fetchone()
     if r:
-        pid = r[0]
+        pid, tg_id = r[0], r[1]
         cur.execute("DELETE FROM permissions WHERE player_id=?", (pid,))
         cur.execute("DELETE FROM players WHERE id=?", (pid,))
+        if tg_id:
+            cur.execute("DELETE FROM registered WHERE tg_id=?", (tg_id,))
         c.commit()
     c.close()
 
@@ -186,10 +210,12 @@ def ensure_admin_player():
     if not p:
         add_player(ADMIN_NICK, "Глава")
         register_player(ADMIN_NICK, ADMIN_ID, "")
+        register_tg(ADMIN_ID, ADMIN_NICK)
         print(f"[INIT] Админ {ADMIN_NICK} добавлен как Глава", flush=True)
     else:
         if p[2] != ADMIN_ID or p[8] != 1:
             register_player(ADMIN_NICK, ADMIN_ID, "")
+            register_tg(ADMIN_ID, ADMIN_NICK)
         if p[4] != "Глава":
             update_player(ADMIN_NICK, "rank", "Глава")
     p = get_player_by_nick(ADMIN_NICK)
@@ -197,9 +223,6 @@ def ensure_admin_player():
         for perm, _ in PERMISSIONS:
             set_permission(p[0], perm, 1)
         print(f"[INIT] Все права выданы {ADMIN_NICK}", flush=True)
-
-
-ensure_admin_player()
 
 
 # ============================================================
@@ -214,6 +237,7 @@ def check_subscription(user_id):
             continue
         try:
             member = bot.get_chat_member(chat_id, user_id)
+            print(f"[SUB] {name}: {member.status}", flush=True)
             results[name] = member.status in ('creator', 'administrator', 'member')
         except Exception as e:
             print(f"[SUB] {name} error: {e}", flush=True)
@@ -245,20 +269,6 @@ def send_subscription_gate(chat_id, user_id):
         f"Не хватает: {', '.join(missing)}\n\n"
         f"Нажми кнопки ниже, а потом «✅ Я подписался».",
         parse_mode='HTML', reply_markup=m)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "check_subs")
-def cb_check_subs(c):
-    bot.answer_callback_query(c.id)
-    subs = check_subscription(c.from_user.id)
-    if subs.get("channel") and subs.get("chat"):
-        try:
-            bot.delete_message(c.message.chat.id, c.message.message_id)
-        except Exception:
-            pass
-        show_main_menu(c.message.chat.id)
-    else:
-        bot.answer_callback_query(c.id, "❌ Ты ещё не подписался везде!", show_alert=True)
 
 
 # ============================================================
@@ -352,9 +362,13 @@ def cmd_help(message):
 
 @bot.message_handler(commands=['me'])
 def cmd_me(message):
-    p = get_player_by_tg(message.from_user.id)
-    if not p:
+    nick = is_registered(message.from_user.id)
+    if not nick:
         bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
+        return
+    p = get_player_by_nick(nick)
+    if not p:
+        bot.reply_to(message, "❌ Ошибка базы. Обратись к админу.")
         return
     perms = get_permissions(p[0])
     perm_text = "\n".join([f"{'✅' if perms.get(k, 0) else '❌'} {v}" for k, v in PERMISSIONS])
@@ -385,9 +399,13 @@ def cmd_ai(message):
     if not args:
         bot.reply_to(message, "🤖 " + ai_ask("Привет! Чем помочь?"))
         return
-    p = get_player_by_tg(message.from_user.id)
-    if not p:
+    nick = is_registered(message.from_user.id)
+    if not nick:
         bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
+        return
+    p = get_player_by_nick(nick)
+    if not p:
+        bot.reply_to(message, "❌ Ошибка базы. Обратись к админу.")
         return
     if p[9]:
         bot.reply_to(message, "🔇 Ты заглушён, не можешь использовать /ai.")
@@ -415,13 +433,13 @@ def cmd_ai(message):
 
 
 # ============================================================
-# РЕГИСТРАЦИЯ
+# РЕГИСТРАЦИЯ В БОТЕ
 # ============================================================
 
 @bot.message_handler(commands=['start'])
 def start(message):
-    p = get_player_by_tg(message.from_user.id)
-    if p and p[8]:
+    nick = is_registered(message.from_user.id)
+    if nick:
         send_subscription_gate(message.chat.id, message.from_user.id)
         return
     m = telebot.types.InlineKeyboardMarkup()
@@ -441,6 +459,10 @@ def process_reg(message):
     p = get_player_by_nick(nick)
     if not p:
         bot.send_message(message.chat.id, "❌ Такого ника нет в клане. Обратись к админу.")
+        return
+    existing = is_registered(message.from_user.id)
+    if existing:
+        bot.send_message(message.chat.id, f"❌ Ты уже зарегистрирован как {existing}.")
         return
     if p[8]:
         bot.send_message(message.chat.id, "❌ Этот ник уже занят.")
@@ -468,6 +490,7 @@ def cb_approve(c):
         bot.answer_callback_query(c.id, "Игрок не найден"); return
     nick = r[0]
     register_player(nick, tg_id, "")
+    register_tg(tg_id, nick)
     log_action("register", str(tg_id), nick)
     bot.answer_callback_query(c.id, "Одобрено")
     try:
@@ -497,12 +520,29 @@ def cb_reject(c):
     except Exception:
         pass
 
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_subs")
+def cb_check_subs(c):
+    bot.answer_callback_query(c.id)
+    subs = check_subscription(c.from_user.id)
+    if subs.get("channel") and subs.get("chat"):
+        try:
+            bot.delete_message(c.message.chat.id, c.message.message_id)
+        except Exception:
+            pass
+        show_main_menu(c.message.chat.id)
+    else:
+        bot.answer_callback_query(c.id, "❌ Ты ещё не подписался везде!", show_alert=True)
+
 # ============================================================
 # ГЛАВНОЕ МЕНЮ
 # ============================================================
 
 def show_main_menu(chat_id):
-    p = get_player_by_tg(chat_id)
+    nick = is_registered(chat_id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p:
         return
     m = telebot.types.InlineKeyboardMarkup()
@@ -510,7 +550,7 @@ def show_main_menu(chat_id):
     m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
     m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
     m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
-    if p[2] == ADMIN_ID:
+    if chat_id == ADMIN_ID:
         m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
     bot.send_message(chat_id,
         f"💎 <b>{CLAN_NAME}</b>\n\n👤 {p[1]}\n🎖 {p[4]}\n⭐ {p[5]}\n💰 {p[6]}",
@@ -520,7 +560,10 @@ def show_main_menu(chat_id):
 @bot.callback_query_handler(func=lambda c: c.data == "menu")
 def cb_menu(c):
     bot.answer_callback_query(c.id)
-    p = get_player_by_tg(c.from_user.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p:
         return
     m = telebot.types.InlineKeyboardMarkup()
@@ -528,7 +571,7 @@ def cb_menu(c):
     m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
     m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
     m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
-    if p[2] == ADMIN_ID:
+    if c.from_user.id == ADMIN_ID:
         m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
     try:
         bot.edit_message_text(f"💎 <b>{CLAN_NAME}</b>\n\nВыбери действие 👇",
@@ -541,7 +584,10 @@ def cb_menu(c):
 @bot.callback_query_handler(func=lambda c: c.data == "me")
 def cb_me(c):
     bot.answer_callback_query(c.id)
-    p = get_player_by_tg(c.from_user.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p:
         return
     perms = get_permissions(p[0])
@@ -674,12 +720,18 @@ def cb_ai_rep(c):
 @bot.callback_query_handler(func=lambda c: c.data == "ai_free")
 def cb_ai_free(c):
     bot.answer_callback_query(c.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
     s = bot.send_message(c.message.chat.id, "💬 Напиши свой вопрос:")
     bot.register_next_step_handler(s, process_ai_free)
 
 
 def process_ai_free(message):
-    p = get_player_by_tg(message.from_user.id)
+    nick = is_registered(message.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p or p[9]:
         return
     bot.send_message(message.chat.id, "🤖 " + ai_ask(message.text))
@@ -693,14 +745,17 @@ def process_ai_free(message):
 @bot.callback_query_handler(func=lambda c: c.data == "post_menu")
 def cb_post_menu(c):
     bot.answer_callback_query(c.id)
-    p = get_player_by_tg(c.from_user.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p:
         return
     now = int(time.time())
     if now - p[11] > POST_WINDOW:
-        update_player(p[1], "post_count", 0)
-        update_player(p[1], "post_window_start", now)
-        p = get_player_by_tg(c.from_user.id)
+        update_player(nick, "post_count", 0)
+        update_player(nick, "post_window_start", now)
+        p = get_player_by_nick(nick)
     if c.from_user.id != ADMIN_ID and p[10] >= POST_LIMIT:
         bot.send_message(c.message.chat.id, f"❌ Лимит: {POST_LIMIT} постов в 5 часов.")
         return
@@ -709,7 +764,10 @@ def cb_post_menu(c):
 
 
 def process_post(message):
-    p = get_player_by_tg(message.from_user.id)
+    nick = is_registered(message.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
     if not p:
         return
     text = (message.text or message.caption or "").strip()
@@ -723,18 +781,18 @@ def process_post(message):
     if message.from_user.id != ADMIN_ID:
         now = int(time.time())
         if now - p[11] > POST_WINDOW:
-            update_player(p[1], "post_count", 0)
-            update_player(p[1], "post_window_start", now)
-            p = get_player_by_tg(message.from_user.id)
+            update_player(nick, "post_count", 0)
+            update_player(nick, "post_window_start", now)
+            p = get_player_by_nick(nick)
         if p[10] >= POST_LIMIT:
             bot.send_message(message.chat.id, f"❌ Лимит: {POST_LIMIT} постов в 5 часов.")
             return
     photo_id = message.photo[-1].file_id if message.photo else None
-    ok2, err = send_to_channel(text, photo_id, author=p[1])
+    ok2, err = send_to_channel(text, photo_id, author=nick)
     if ok2:
         if message.from_user.id != ADMIN_ID:
-            update_player(p[1], "post_count", p[10] + 1)
-        log_action("post", p[1], text[:100])
+            update_player(nick, "post_count", p[10] + 1)
+        log_action("post", nick, text[:100])
         bot.send_message(message.chat.id, "✅ Пост опубликован.")
         show_main_menu(message.chat.id)
     else:
@@ -1074,6 +1132,9 @@ def cb_adm_export(c):
 # ============================================================
 # ЗАПУСК
 # ============================================================
+
+ensure_admin_player()
+print("[INIT] Админ готов", flush=True)
 
 print("[BOT] polling...", flush=True)
 while True:
