@@ -74,6 +74,10 @@ def init_db():
         reputation INTEGER DEFAULT 0,
         treasury INTEGER DEFAULT 0,
         notes TEXT DEFAULT '',
+        about_help TEXT DEFAULT '',
+        about_skills TEXT DEFAULT '',
+        about_likes TEXT DEFAULT '',
+        about_self TEXT DEFAULT '',
         registered INTEGER DEFAULT 0,
         muted INTEGER DEFAULT 0,
         post_count INTEGER DEFAULT 0,
@@ -92,6 +96,10 @@ def init_db():
     cur.execute("""CREATE TABLE IF NOT EXISTS log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         action TEXT, actor TEXT DEFAULT '', details TEXT DEFAULT '', created INTEGER)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_tg INTEGER, from_nick TEXT, target_nick TEXT,
+        reason TEXT, status TEXT DEFAULT 'open', created INTEGER)""")
     c.commit(); c.close()
 
 
@@ -111,7 +119,7 @@ def log_action(action, actor="", details=""):
 
 
 # ============================================================
-# РЕГИСТРАЦИЯ (по tg_id)
+# РЕГИСТРАЦИЯ
 # ============================================================
 
 def is_registered(tg_id):
@@ -128,11 +136,6 @@ def register_tg(tg_id, game_nick, tg_username=""):
     c.commit(); c.close()
 
 
-def unregister_tg(tg_id):
-    c = get_conn(); c.cursor().execute("DELETE FROM registered WHERE tg_id=?", (tg_id,))
-    c.commit(); c.close()
-
-
 # ============================================================
 # ИГРОКИ
 # ============================================================
@@ -140,7 +143,8 @@ def unregister_tg(tg_id):
 def get_player_by_nick(nick):
     c = get_conn(); cur = c.cursor()
     cur.execute("""SELECT id, game_nick, tg_id, tg_username, rank, reputation, treasury, notes,
-        registered, muted, post_count, post_window_start FROM players WHERE game_nick=?""", (nick,))
+        registered, muted, post_count, post_window_start,
+        about_help, about_skills, about_likes, about_self FROM players WHERE game_nick=?""", (nick,))
     r = cur.fetchone(); c.close(); return r
 
 
@@ -164,6 +168,8 @@ def register_player(nick, tg_id, tg_username):
 
 
 def delete_player(nick):
+    if nick == ADMIN_NICK:
+        return False
     c = get_conn(); cur = c.cursor()
     cur.execute("SELECT id, tg_id FROM players WHERE game_nick=?", (nick,))
     r = cur.fetchone()
@@ -175,6 +181,7 @@ def delete_player(nick):
             cur.execute("DELETE FROM registered WHERE tg_id=?", (tg_id,))
         c.commit()
     c.close()
+    return True
 
 
 def update_player(nick, field, value):
@@ -189,8 +196,12 @@ def get_permissions(player_id):
 
 
 def set_permission(player_id, perm, enabled):
-    c = get_conn(); c.cursor().execute(
-        "INSERT OR REPLACE INTO permissions (player_id, perm, enabled) VALUES (?, ?, ?)",
+    c = get_conn(); cur = c.cursor()
+    cur.execute("SELECT game_nick FROM players WHERE id=?", (player_id,))
+    r = cur.fetchone()
+    if r and r[0] == ADMIN_NICK:
+        enabled = 1
+    cur.execute("INSERT OR REPLACE INTO permissions (player_id, perm, enabled) VALUES (?, ?, ?)",
         (player_id, perm, 1 if enabled else 0))
     c.commit(); c.close()
 
@@ -300,17 +311,16 @@ def giga_token():
 def ai_ask(prompt):
     tok = giga_token()
     if not tok:
-        return "⚠️ ИИ временно недоступен (нет токена)."
+        return "⚠️ ИИ временно недоступен."
     try:
         r = requests.post("https://api.giga.chat/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {tok}"},
             json={"model": "GigaChat-2", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300},
             verify=False, timeout=30)
-        print(f"[AI] {r.status_code}: {r.text[:200]}", flush=True)
+        print(f"[AI] {r.status_code}", flush=True)
         data = r.json()
         return data.get("choices", [{}])[0].get("message", {}).get("content", "Нет ответа")
     except Exception as e:
-        print(f"[AI] exception: {e}", flush=True)
         return f"⚠️ Ошибка ИИ: {e}"
 
 
@@ -340,6 +350,13 @@ def send_to_channel(text, photo_id=None, author=""):
         return False, str(e)
 
 
+def notify_admin(t):
+    try:
+        bot.send_message(ADMIN_ID, t, parse_mode='HTML')
+    except Exception:
+        pass
+
+
 # ============================================================
 # КОМАНДЫ В ЧАТЕ
 # ============================================================
@@ -350,10 +367,11 @@ def cmd_help(message):
         return
     bot.reply_to(message,
         "📋 <b>Команды</b>\n\n"
-        "/ai вопрос — спросить ИИ\n"
-        "/ai сколько игроков — кол-во + ники\n"
-        "/ai ники — список ников\n"
-        "/ai ник репутация — репутация\n"
+        "/ai вопрос — ИИ\n"
+        "/ai сколько игроков\n"
+        "/ai ники\n"
+        "/ai Ник репутация\n"
+        "/ai кто может добавлять\n"
         "/me — профиль\n"
         "/clan — список клана\n"
         "/help — справка",
@@ -364,16 +382,17 @@ def cmd_help(message):
 def cmd_me(message):
     nick = is_registered(message.from_user.id)
     if not nick:
-        bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
+        bot.reply_to(message, "❌ Ты не зарегистрирован.")
         return
     p = get_player_by_nick(nick)
     if not p:
-        bot.reply_to(message, "❌ Ошибка базы. Обратись к админу.")
         return
     perms = get_permissions(p[0])
     perm_text = "\n".join([f"{'✅' if perms.get(k, 0) else '❌'} {v}" for k, v in PERMISSIONS])
     bot.reply_to(message,
         f"👤 <b>{p[1]}</b>\n🎖 Ранг: {p[4]}\n⭐ Репутация: {p[5]}\n💰 Казна: {p[6]}\n\n"
+        f"<b>Обо мне:</b>\n"
+        f"🤝 {p[12] or '—'}\n🛠 {p[13] or '—'}\n❤️ {p[14] or '—'}\n📝 {p[15] or '—'}\n\n"
         f"<b>Права:</b>\n{perm_text}",
         parse_mode='HTML')
 
@@ -401,14 +420,13 @@ def cmd_ai(message):
         return
     nick = is_registered(message.from_user.id)
     if not nick:
-        bot.reply_to(message, "❌ Ты не зарегистрирован. Открой бота в личке и зарегистрируйся.")
+        bot.reply_to(message, "❌ Ты не зарегистрирован.")
         return
     p = get_player_by_nick(nick)
     if not p:
-        bot.reply_to(message, "❌ Ошибка базы. Обратись к админу.")
         return
     if p[9]:
-        bot.reply_to(message, "🔇 Ты заглушён, не можешь использовать /ai.")
+        bot.reply_to(message, "🔇 Ты заглушён.")
         return
     low = args.lower()
     if "сколько игроков" in low:
@@ -429,11 +447,36 @@ def cmd_ai(message):
                 return
         bot.reply_to(message, "❌ Игрок не найден.")
         return
+    if "кто может добавлять" in low or "кто может приглашать" in low:
+        c2 = get_conn(); cur = c2.cursor()
+        cur.execute("""SELECT p.game_nick, p.rank FROM players p
+            JOIN permissions perm ON perm.player_id = p.id
+            WHERE perm.perm = 'invite' AND perm.enabled = 1 ORDER BY p.id""")
+        rows = cur.fetchall(); c2.close()
+        if not rows:
+            bot.reply_to(message, "❌ Ни у кого нет права приглашать.")
+            return
+        lines = [f"✅ {n} ({r})" for n, r in rows]
+        bot.reply_to(message, "👥 <b>Могут добавлять:</b>\n" + "\n".join(lines), parse_mode='HTML')
+        return
+    # контекст игрока
+    for pl in all_players():
+        if pl[1].lower() in low:
+            t = get_player_by_nick(pl[1])
+            if t:
+                prompt = (
+                    f"Игрок клана {t[1]}.\nРанг: {t[4]}, репутация: {t[5]}.\n"
+                    f"Помогает: {t[12] or '—'}\nУмеет: {t[13] or '—'}\nЛюбит: {t[14] or '—'}\n"
+                    f"О себе: {t[15] or '—'}\nЗаметки: {t[7] or '—'}\n\n"
+                    f"Вопрос: {args}\nОтветь кратко на основе данных."
+                )
+                bot.reply_to(message, "🤖 " + ai_ask(prompt))
+                return
     bot.reply_to(message, "🤖 " + ai_ask(args))
 
 
 # ============================================================
-# РЕГИСТРАЦИЯ В БОТЕ
+# РЕГИСТРАЦИЯ + АНКЕТА
 # ============================================================
 
 @bot.message_handler(commands=['start'])
@@ -458,14 +501,14 @@ def process_reg(message):
     nick = (message.text or "").strip()
     p = get_player_by_nick(nick)
     if not p:
-        bot.send_message(message.chat.id, "❌ Такого ника нет в клане. Обратись к админу.")
+        bot.send_message(message.chat.id, "❌ Такого ника нет. Обратись к админу.")
         return
     existing = is_registered(message.from_user.id)
     if existing:
         bot.send_message(message.chat.id, f"❌ Ты уже зарегистрирован как {existing}.")
         return
     if p[8]:
-        bot.send_message(message.chat.id, "❌ Этот ник уже занят.")
+        bot.send_message(message.chat.id, "❌ Ник занят.")
         return
     m = telebot.types.InlineKeyboardMarkup()
     m.add(telebot.types.InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{p[0]}_{message.from_user.id}"))
@@ -474,7 +517,7 @@ def process_reg(message):
     bot.send_message(ADMIN_ID,
         f"🆕 <b>Заявка</b>\nНик: {nick}\nTG: {uname}\nID: {message.from_user.id}",
         parse_mode='HTML', reply_markup=m)
-    bot.send_message(message.chat.id, "✅ Заявка отправлена админу. Жди одобрения.")
+    bot.send_message(message.chat.id, "✅ Заявка отправлена админу.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("approve_"))
@@ -487,15 +530,15 @@ def cb_approve(c):
     cur.execute("SELECT game_nick FROM players WHERE id=?", (pid,))
     r = cur.fetchone(); c2.close()
     if not r:
-        bot.answer_callback_query(c.id, "Игрок не найден"); return
+        bot.answer_callback_query(c.id, "Не найден"); return
     nick = r[0]
     register_player(nick, tg_id, "")
     register_tg(tg_id, nick)
     log_action("register", str(tg_id), nick)
     bot.answer_callback_query(c.id, "Одобрено")
     try:
-        bot.send_message(tg_id, f"✅ Ты зарегистрирован как <b>{nick}</b>!", parse_mode='HTML')
-        send_subscription_gate(tg_id, tg_id)
+        bot.send_message(tg_id, f"✅ Ты зарегистрирован как <b>{nick}</b>!\n\nСейчас анкета.", parse_mode='HTML')
+        start_anketa(tg_id, nick)
     except Exception:
         pass
     try:
@@ -508,11 +551,10 @@ def cb_approve(c):
 def cb_reject(c):
     if c.from_user.id != ADMIN_ID:
         bot.answer_callback_query(c.id, "Не админ", show_alert=True); return
-    parts = c.data.split("_")
-    tg_id = int(parts[2])
+    tg_id = int(c.data.split("_")[2])
     bot.answer_callback_query(c.id, "Отклонено")
     try:
-        bot.send_message(tg_id, "❌ Заявка отклонена админом.")
+        bot.send_message(tg_id, "❌ Заявка отклонена.")
     except Exception:
         pass
     try:
@@ -532,114 +574,69 @@ def cb_check_subs(c):
             pass
         show_main_menu(c.message.chat.id)
     else:
-        bot.answer_callback_query(c.id, "❌ Ты ещё не подписался везде!", show_alert=True)
+        bot.answer_callback_query(c.id, "❌ Не подписался везде!", show_alert=True)
+
 
 # ============================================================
-# ГЛАВНОЕ МЕНЮ
+# АНКЕТА
 # ============================================================
 
-def show_main_menu(chat_id):
-    nick = is_registered(chat_id)
-    if not nick:
+def start_anketa(chat_id, nick):
+    s = bot.send_message(chat_id,
+        "❓ <b>Вопрос 1 из 4</b>\n\n"
+        "Расскажи о себе — кто ты по игровому (например, «добрый, помогаю новичкам»):",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, anketa_self, nick)
+
+
+def anketa_self(message, nick):
+    ans = (message.text or "").strip()
+    if not ans:
+        bot.send_message(message.chat.id, "❌ Напиши ответ.")
         return
-    p = get_player_by_nick(nick)
-    if not p:
+    update_player(nick, "about_self", ans[:300])
+    s = bot.send_message(message.chat.id,
+        "❓ <b>Вопрос 2 из 4</b>\n\n"
+        "Будешь помогать соклановцам? (да / нет / иногда)",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, anketa_help, nick)
+
+
+def anketa_help(message, nick):
+    ans = (message.text or "").strip()
+    if not ans:
+        bot.send_message(message.chat.id, "❌ Напиши ответ.")
         return
-    m = telebot.types.InlineKeyboardMarkup()
-    m.add(telebot.types.InlineKeyboardButton("👤 Мой профиль", callback_data="me"))
-    m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
-    m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
-    m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
-    if chat_id == ADMIN_ID:
-        m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
-    bot.send_message(chat_id,
-        f"💎 <b>{CLAN_NAME}</b>\n\n👤 {p[1]}\n🎖 {p[4]}\n⭐ {p[5]}\n💰 {p[6]}",
-        parse_mode='HTML', reply_markup=m)
+    update_player(nick, "about_help", ans[:200])
+    s = bot.send_message(message.chat.id,
+        "❓ <b>Вопрос 3 из 4</b>\n\n"
+        "Что ты умеешь? (например: PvP, стратегии, база)",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, anketa_skills, nick)
 
 
-@bot.callback_query_handler(func=lambda c: c.data == "menu")
-def cb_menu(c):
-    bot.answer_callback_query(c.id)
-    nick = is_registered(c.from_user.id)
-    if not nick:
+def anketa_skills(message, nick):
+    ans = (message.text or "").strip()
+    if not ans:
+        bot.send_message(message.chat.id, "❌ Напиши ответ.")
         return
-    p = get_player_by_nick(nick)
-    if not p:
+    update_player(nick, "about_skills", ans[:300])
+    s = bot.send_message(message.chat.id,
+        "❓ <b>Вопрос 4 из 4</b>\n\n"
+        "Что ты любишь делать в игре?",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, anketa_likes, nick)
+
+
+def anketa_likes(message, nick):
+    ans = (message.text or "").strip()
+    if not ans:
+        bot.send_message(message.chat.id, "❌ Напиши ответ.")
         return
-    m = telebot.types.InlineKeyboardMarkup()
-    m.add(telebot.types.InlineKeyboardButton("👤 Мой профиль", callback_data="me"))
-    m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
-    m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
-    m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
-    if c.from_user.id == ADMIN_ID:
-        m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
-    try:
-        bot.edit_message_text(f"💎 <b>{CLAN_NAME}</b>\n\nВыбери действие 👇",
-            chat_id=c.message.chat.id, message_id=c.message.message_id,
-            parse_mode='HTML', reply_markup=m)
-    except Exception:
-        pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "me")
-def cb_me(c):
-    bot.answer_callback_query(c.id)
-    nick = is_registered(c.from_user.id)
-    if not nick:
-        return
-    p = get_player_by_nick(nick)
-    if not p:
-        return
-    perms = get_permissions(p[0])
-    perm_lines = "\n".join([f"{'✅' if perms.get(k, 0) else '❌'} {v}" for k, v in PERMISSIONS])
-    m = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("⬅️ В меню", callback_data="menu"))
-    try:
-        bot.edit_message_text(
-            f"👤 <b>{p[1]}</b>\n🎖 Ранг: {p[4]}\n⭐ Репутация: {p[5]}\n💰 Казна: {p[6]}\n\n"
-            f"<b>Права:</b>\n{perm_lines}\n\n<b>Заметки:</b> {p[7] or '—'}",
-            chat_id=c.message.chat.id, message_id=c.message.message_id,
-            parse_mode='HTML', reply_markup=m)
-    except Exception:
-        pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "clan_list")
-def cb_clan_list(c):
-    bot.answer_callback_query(c.id)
-    players = all_players()
-    m = telebot.types.InlineKeyboardMarkup()
-    for p in players:
-        m.add(telebot.types.InlineKeyboardButton(f"{p[1]} ({p[4]})", callback_data=f"pinfo_{p[0]}"))
-    m.add(telebot.types.InlineKeyboardButton("⬅️ В меню", callback_data="menu"))
-    lines = [f"🏰 <b>{CLAN_NAME}</b> — {len(players)} игроков\n"]
-    for p in players:
-        lines.append(f"{'✅' if p[8] else '⏳'} {p[1]} — {p[4]} ⭐{p[5]}")
-    try:
-        bot.edit_message_text("\n".join(lines), chat_id=c.message.chat.id,
-            message_id=c.message.message_id, parse_mode='HTML', reply_markup=m)
-    except Exception:
-        pass
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pinfo_"))
-def cb_pinfo(c):
-    bot.answer_callback_query(c.id)
-    pid = int(c.data.split("_")[1])
-    c2 = get_conn(); cur = c2.cursor()
-    cur.execute("SELECT game_nick, rank, reputation, treasury, notes, registered FROM players WHERE id=?", (pid,))
-    r = cur.fetchone(); c2.close()
-    if not r:
-        return
-    m = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="clan_list"))
-    try:
-        bot.edit_message_text(
-            f"👤 <b>{r[0]}</b>\n🎖 {r[1]}\n⭐ {r[2]}\n💰 {r[3]}\n"
-            f"{'✅ Зарегистрирован' if r[5] else '⏳ Не зарегистрирован'}\n📝 {r[4] or '—'}",
-            chat_id=c.message.chat.id, message_id=c.message.message_id,
-            parse_mode='HTML', reply_markup=m)
-    except Exception:
-        pass
-
+    update_player(nick, "about_likes", ans[:300])
+    bot.send_message(message.chat.id, "✅ Анкета заполнена! Теперь проверю подписку.",
+        parse_mode='HTML')
+    send_subscription_gate(message.chat.id, message.from_user.id)
 
 # ============================================================
 # ИИ-МЕНЮ
@@ -734,7 +731,38 @@ def process_ai_free(message):
     p = get_player_by_nick(nick)
     if not p or p[9]:
         return
-    bot.send_message(message.chat.id, "🤖 " + ai_ask(message.text))
+    text = message.text or ""
+    low = text.lower()
+
+    if "кто может добавлять" in low or "кто может приглашать" in low:
+        c2 = get_conn(); cur = c2.cursor()
+        cur.execute("""SELECT p.game_nick, p.rank FROM players p
+            JOIN permissions perm ON perm.player_id = p.id
+            WHERE perm.perm = 'invite' AND perm.enabled = 1""")
+        rows = cur.fetchall(); c2.close()
+        if not rows:
+            bot.send_message(message.chat.id, "❌ Ни у кого нет права приглашать.")
+        else:
+            lines = [f"✅ {n} ({r})" for n, r in rows]
+            bot.send_message(message.chat.id, "👥 <b>Могут добавлять:</b>\n" + "\n".join(lines), parse_mode='HTML')
+        show_main_menu(message.chat.id)
+        return
+
+    for pl in all_players():
+        if pl[1].lower() in low:
+            t = get_player_by_nick(pl[1])
+            if t:
+                prompt = (
+                    f"Игрок клана {t[1]}.\nРанг: {t[4]}, репутация: {t[5]}.\n"
+                    f"Помогает: {t[12] or '—'}\nУмеет: {t[13] or '—'}\nЛюбит: {t[14] or '—'}\n"
+                    f"О себе: {t[15] or '—'}\nЗаметки: {t[7] or '—'}\n\n"
+                    f"Вопрос: {text}\nОтветь кратко на основе данных."
+                )
+                bot.send_message(message.chat.id, "🤖 " + ai_ask(prompt))
+                show_main_menu(message.chat.id)
+                return
+
+    bot.send_message(message.chat.id, "🤖 " + ai_ask(text))
     show_main_menu(message.chat.id)
 
 
@@ -800,6 +828,105 @@ def process_post(message):
 
 
 # ============================================================
+# ЖАЛОБА
+# ============================================================
+
+@bot.callback_query_handler(func=lambda c: c.data == "report")
+def cb_report(c):
+    bot.answer_callback_query(c.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        bot.send_message(c.message.chat.id, "❌ Ты не зарегистрирован.")
+        return
+    try:
+        bot.delete_message(c.message.chat.id, c.message.message_id)
+    except Exception:
+        pass
+    s = bot.send_message(c.message.chat.id,
+        "🚨 <b>Жалоба</b>\n\nНапиши ник игрока, на кого жалуешься:",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, report_nick, nick)
+
+
+def report_nick(message, from_nick):
+    target = (message.text or "").strip()
+    if not target:
+        bot.send_message(message.chat.id, "❌ Пусто.")
+        return
+    p = get_player_by_nick(target)
+    if not p:
+        bot.send_message(message.chat.id, f"❌ Игрок {target} не найден.")
+        return
+    if target == from_nick:
+        bot.send_message(message.chat.id, "❌ На себя нельзя.")
+        return
+    s = bot.send_message(message.chat.id,
+        f"✏️ Что сделал <b>{target}</b>?\nОпиши: оскорбления, спам, мошенничество и т.д.:",
+        parse_mode='HTML')
+    bot.register_next_step_handler(s, report_reason, from_nick, target)
+
+
+def report_reason(message, from_nick, target):
+    reason = (message.text or "").strip()
+    if not reason:
+        bot.send_message(message.chat.id, "❌ Пусто.")
+        return
+    if len(reason) > 500:
+        bot.send_message(message.chat.id, "❌ Макс 500 символов.")
+        return
+    c = get_conn(); cur = c.cursor()
+    cur.execute("INSERT INTO reports (from_tg, from_nick, target_nick, reason, status, created) VALUES (?, ?, ?, ?, 'open', ?)",
+                (message.from_user.id, from_nick, target, reason, int(time.time())))
+    rid = cur.lastrowid
+    c.commit(); c.close()
+
+    m = telebot.types.InlineKeyboardMarkup()
+    m.add(
+        telebot.types.InlineKeyboardButton("✅ Принять меры", callback_data=f"report_act_{rid}"),
+        telebot.types.InlineKeyboardButton("❌ Отклонить", callback_data=f"report_rej_{rid}")
+    )
+    bot.send_message(ADMIN_ID,
+        f"🚨 <b>Жалоба #{rid}</b>\n\n"
+        f"👤 От: <b>{from_nick}</b> (<code>{message.from_user.id}</code>)\n"
+        f"🎯 На: <b>{target}</b>\n\n📝 {reason}",
+        parse_mode='HTML', reply_markup=m)
+    log_action("report", from_nick, f"на {target}: {reason[:100]}")
+    bot.send_message(message.chat.id, f"✅ Жалоба на <b>{target}</b> отправлена.", parse_mode='HTML')
+    show_main_menu(message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("report_act_"))
+def cb_report_act(c):
+    if c.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(c.id, "Не админ", show_alert=True); return
+    rid = int(c.data.split("_")[2])
+    c2 = get_conn(); c2.cursor().execute("UPDATE reports SET status='accepted' WHERE id=?", (rid,))
+    c2.commit(); c2.close()
+    bot.answer_callback_query(c.id, "Принято")
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(c.message.chat.id, f"✅ Жалоба #{rid} принята.")
+    log_action("report_accept", "admin", f"#{rid}")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("report_rej_"))
+def cb_report_rej(c):
+    if c.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(c.id, "Не админ", show_alert=True); return
+    rid = int(c.data.split("_")[2])
+    c2 = get_conn(); c2.cursor().execute("UPDATE reports SET status='rejected' WHERE id=?", (rid,))
+    c2.commit(); c2.close()
+    bot.answer_callback_query(c.id, "Отклонено")
+    try:
+        bot.edit_message_reply_markup(c.message.chat.id, c.message.message_id, reply_markup=None)
+    except Exception:
+        pass
+    bot.send_message(c.message.chat.id, f"❌ Жалоба #{rid} отклонена.")
+
+
+# ============================================================
 # АДМИН-ПАНЕЛЬ
 # ============================================================
 
@@ -812,12 +939,41 @@ def cb_admin(c):
     m.add(telebot.types.InlineKeyboardButton("👥 Игроки", callback_data="adm_players"))
     m.add(telebot.types.InlineKeyboardButton("🎖 Ранги", callback_data="adm_ranks"))
     m.add(telebot.types.InlineKeyboardButton("💰 Казна", callback_data="adm_treasury"))
+    m.add(telebot.types.InlineKeyboardButton("🚨 Жалобы", callback_data="adm_reports"))
     m.add(telebot.types.InlineKeyboardButton("📝 Лог", callback_data="adm_log"))
     m.add(telebot.types.InlineKeyboardButton("📤 Экспорт", callback_data="adm_export"))
     m.add(telebot.types.InlineKeyboardButton("⬅️ В меню", callback_data="menu"))
     try:
         bot.edit_message_text("👑 <b>Админ-панель</b>", chat_id=c.message.chat.id,
             message_id=c.message.message_id, parse_mode='HTML', reply_markup=m)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_reports")
+def cb_adm_reports(c):
+    if c.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(c.id)
+    c2 = get_conn(); cur = c2.cursor()
+    cur.execute("SELECT id, from_nick, target_nick, reason, status FROM reports ORDER BY id DESC LIMIT 20")
+    rows = cur.fetchall(); c2.close()
+    m = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="admin"))
+    if not rows:
+        try:
+            bot.edit_message_text("🚨 <b>Жалобы</b>\n\nПусто.", chat_id=c.message.chat.id,
+                message_id=c.message.message_id, parse_mode='HTML', reply_markup=m)
+        except Exception:
+            pass
+        return
+    lines = []
+    for rid, fn, tn, reason, status in rows:
+        icon = {"open": "🟡", "accepted": "✅", "rejected": "❌"}.get(status, "⚪")
+        lines.append(f"{icon} #{rid} — {fn} → {tn}: {reason[:40]}")
+    try:
+        bot.edit_message_text("🚨 <b>Жалобы</b>\n\n" + "\n".join(lines),
+            chat_id=c.message.chat.id, message_id=c.message.message_id,
+            parse_mode='HTML', reply_markup=m)
     except Exception:
         pass
 
@@ -853,7 +1009,7 @@ def adm_add_nick(message):
         return
     add_player(nick)
     log_action("add_player", "admin", nick)
-    bot.send_message(message.chat.id, f"✅ Игрок {nick} добавлен. Теперь он может зарегистрироваться.")
+    bot.send_message(message.chat.id, f"✅ {nick} добавлен. Может регистрироваться.")
 
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_list")
@@ -880,7 +1036,8 @@ def cb_adm_p(c):
     bot.answer_callback_query(c.id)
     pid = int(c.data.split("_")[2])
     c2 = get_conn(); cur = c2.cursor()
-    cur.execute("SELECT game_nick, rank, reputation, treasury, notes, registered FROM players WHERE id=?", (pid,))
+    cur.execute("""SELECT game_nick, rank, reputation, treasury, notes, registered,
+        about_self, about_help, about_skills, about_likes FROM players WHERE id=?""", (pid,))
     r = cur.fetchone(); c2.close()
     if not r:
         return
@@ -889,13 +1046,15 @@ def cb_adm_p(c):
     m.add(telebot.types.InlineKeyboardButton("✅ Права", callback_data=f"adm_perms_{pid}"))
     m.add(telebot.types.InlineKeyboardButton("📝 Заметки", callback_data=f"adm_note_{pid}"))
     m.add(telebot.types.InlineKeyboardButton("💰 Казна", callback_data=f"adm_treas_{pid}"))
-    m.add(telebot.types.InlineKeyboardButton("🔇 Мут /ai", callback_data=f"adm_mute_{pid}"))
+    m.add(telebot.types.InlineKeyboardButton("🔇 Мут", callback_data=f"adm_mute_{pid}"))
     m.add(telebot.types.InlineKeyboardButton("🗑 Удалить", callback_data=f"adm_del_{pid}"))
     m.add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="adm_list"))
     try:
         bot.edit_message_text(
             f"👤 <b>{r[0]}</b>\n🎖 {r[1]}\n⭐ {r[2]}\n💰 {r[3]}\n"
-            f"{'✅ Зарегистрирован' if r[5] else '⏳ Не зарегистрирован'}\n📝 {r[4] or '—'}",
+            f"{'✅' if r[5] else '⏳'}\n\n"
+            f"<b>Обо мне:</b>\n📝 {r[6] or '—'}\n🤝 {r[7] or '—'}\n🛠 {r[8] or '—'}\n❤️ {r[9] or '—'}\n\n"
+            f"<b>Заметки:</b> {r[4] or '—'}",
             chat_id=c.message.chat.id, message_id=c.message.message_id,
             parse_mode='HTML', reply_markup=m)
     except Exception:
@@ -959,6 +1118,12 @@ def cb_toggle(c):
         return
     parts = c.data.split("_")
     pid, perm = int(parts[1]), parts[2]
+    c2 = get_conn(); cur = c2.cursor()
+    cur.execute("SELECT game_nick FROM players WHERE id=?", (pid,))
+    r = cur.fetchone(); c2.close()
+    if r and r[0] == ADMIN_NICK:
+        bot.answer_callback_query(c.id, "❌ Права админа менять нельзя", show_alert=True)
+        return
     perms = get_permissions(pid)
     new = 0 if perms.get(perm, 0) else 1
     set_permission(pid, perm, new)
@@ -972,7 +1137,7 @@ def cb_adm_note(c):
         return
     bot.answer_callback_query(c.id)
     pid = int(c.data.split("_")[2])
-    s = bot.send_message(c.message.chat.id, "Введи заметку об игроке:")
+    s = bot.send_message(c.message.chat.id, "Введи заметку:")
     bot.register_next_step_handler(s, lambda m: adm_note_save(m, pid))
 
 
@@ -992,7 +1157,7 @@ def cb_adm_treas(c):
         return
     bot.answer_callback_query(c.id)
     pid = int(c.data.split("_")[2])
-    s = bot.send_message(c.message.chat.id, "Введи сумму (например 500 или -100):")
+    s = bot.send_message(c.message.chat.id, "Введи сумму (+ пополнить, - снять):")
     bot.register_next_step_handler(s, lambda m: adm_treas_save(m, pid))
 
 
@@ -1010,7 +1175,7 @@ def adm_treas_save(message, pid):
     new = max(0, r[1] + amt)
     update_player(r[0], "treasury", new)
     log_action("treasury", "admin", f"{r[0]}: {amt:+d}")
-    bot.send_message(message.chat.id, f"✅ Казна {r[0]}: {new}")
+    bot.send_message(message.chat.id, f"✅ {r[0]}: {new}")
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_mute_"))
@@ -1039,6 +1204,9 @@ def cb_adm_del(c):
     cur.execute("SELECT game_nick FROM players WHERE id=?", (pid,))
     r = cur.fetchone(); c2.close()
     if r:
+        if r[0] == ADMIN_NICK:
+            bot.answer_callback_query(c.id, "❌ Админа удалить нельзя", show_alert=True)
+            return
         delete_player(r[0])
         log_action("delete_player", "admin", r[0])
     bot.send_message(c.message.chat.id, "🗑 Удалён.")
