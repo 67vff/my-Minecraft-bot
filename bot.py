@@ -358,6 +358,30 @@ def notify_admin(t):
 
 
 # ============================================================
+# ГЛАВНОЕ МЕНЮ
+# ============================================================
+
+def show_main_menu(chat_id):
+    nick = is_registered(chat_id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
+    if not p:
+        return
+    m = telebot.types.InlineKeyboardMarkup()
+    m.add(telebot.types.InlineKeyboardButton("👤 Мой профиль", callback_data="me"))
+    m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
+    m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
+    m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
+    m.add(telebot.types.InlineKeyboardButton("🚨 Жалоба", callback_data="report"))
+    if chat_id == ADMIN_ID:
+        m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
+    bot.send_message(chat_id,
+        f"💎 <b>{CLAN_NAME}</b>\n\n👤 {p[1]}\n🎖 {p[4]}\n⭐ {p[5]}\n💰 {p[6]}",
+        parse_mode='HTML', reply_markup=m)
+
+
+# ============================================================
 # КОМАНДЫ В ЧАТЕ
 # ============================================================
 
@@ -392,7 +416,7 @@ def cmd_me(message):
     bot.reply_to(message,
         f"👤 <b>{p[1]}</b>\n🎖 Ранг: {p[4]}\n⭐ Репутация: {p[5]}\n💰 Казна: {p[6]}\n\n"
         f"<b>Обо мне:</b>\n"
-        f"🤝 {p[12] or '—'}\n🛠 {p[13] or '—'}\n❤️ {p[14] or '—'}\n📝 {p[15] or '—'}\n\n"
+        f"📝 {p[15] or '—'}\n🤝 {p[12] or '—'}\n🛠 {p[13] or '—'}\n❤️ {p[14] or '—'}\n\n"
         f"<b>Права:</b>\n{perm_text}",
         parse_mode='HTML')
 
@@ -459,7 +483,6 @@ def cmd_ai(message):
         lines = [f"✅ {n} ({r})" for n, r in rows]
         bot.reply_to(message, "👥 <b>Могут добавлять:</b>\n" + "\n".join(lines), parse_mode='HTML')
         return
-    # контекст игрока
     for pl in all_players():
         if pl[1].lower() in low:
             t = get_player_by_nick(pl[1])
@@ -596,8 +619,7 @@ def anketa_self(message, nick):
         return
     update_player(nick, "about_self", ans[:300])
     s = bot.send_message(message.chat.id,
-        "❓ <b>Вопрос 2 из 4</b>\n\n"
-        "Будешь помогать соклановцам? (да / нет / иногда)",
+        "❓ <b>Вопрос 2 из 4</b>\n\nБудешь помогать соклановцам? (да / нет / иногда)",
         parse_mode='HTML')
     bot.register_next_step_handler(s, anketa_help, nick)
 
@@ -609,8 +631,7 @@ def anketa_help(message, nick):
         return
     update_player(nick, "about_help", ans[:200])
     s = bot.send_message(message.chat.id,
-        "❓ <b>Вопрос 3 из 4</b>\n\n"
-        "Что ты умеешь? (например: PvP, стратегии, база)",
+        "❓ <b>Вопрос 3 из 4</b>\n\nЧто ты умеешь? (например: PvP, стратегии, база)",
         parse_mode='HTML')
     bot.register_next_step_handler(s, anketa_skills, nick)
 
@@ -622,8 +643,7 @@ def anketa_skills(message, nick):
         return
     update_player(nick, "about_skills", ans[:300])
     s = bot.send_message(message.chat.id,
-        "❓ <b>Вопрос 4 из 4</b>\n\n"
-        "Что ты любишь делать в игре?",
+        "❓ <b>Вопрос 4 из 4</b>\n\nЧто ты любишь делать в игре?",
         parse_mode='HTML')
     bot.register_next_step_handler(s, anketa_likes, nick)
 
@@ -637,6 +657,101 @@ def anketa_likes(message, nick):
     bot.send_message(message.chat.id, "✅ Анкета заполнена! Теперь проверю подписку.",
         parse_mode='HTML')
     send_subscription_gate(message.chat.id, message.from_user.id)
+
+# ============================================================
+# МЕНЮ-КНОПКИ
+# ============================================================
+
+@bot.callback_query_handler(func=lambda c: c.data == "menu")
+def cb_menu(c):
+    bot.answer_callback_query(c.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
+    if not p:
+        return
+    m = telebot.types.InlineKeyboardMarkup()
+    m.add(telebot.types.InlineKeyboardButton("👤 Мой профиль", callback_data="me"))
+    m.add(telebot.types.InlineKeyboardButton("🏰 Список клана", callback_data="clan_list"))
+    m.add(telebot.types.InlineKeyboardButton("🤖 Спросить ИИ", callback_data="ai_menu"))
+    m.add(telebot.types.InlineKeyboardButton("📢 Отправить пост в канал", callback_data="post_menu"))
+    m.add(telebot.types.InlineKeyboardButton("🚨 Жалоба", callback_data="report"))
+    if c.from_user.id == ADMIN_ID:
+        m.add(telebot.types.InlineKeyboardButton("👑 Админ-панель", callback_data="admin"))
+    try:
+        bot.edit_message_text(f"💎 <b>{CLAN_NAME}</b>\n\nВыбери действие 👇",
+            chat_id=c.message.chat.id, message_id=c.message.message_id,
+            parse_mode='HTML', reply_markup=m)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "me")
+def cb_me(c):
+    bot.answer_callback_query(c.id)
+    nick = is_registered(c.from_user.id)
+    if not nick:
+        return
+    p = get_player_by_nick(nick)
+    if not p:
+        return
+    perms = get_permissions(p[0])
+    perm_lines = "\n".join([f"{'✅' if perms.get(k, 0) else '❌'} {v}" for k, v in PERMISSIONS])
+    m = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("⬅️ В меню", callback_data="menu"))
+    try:
+        bot.edit_message_text(
+            f"👤 <b>{p[1]}</b>\n🎖 Ранг: {p[4]}\n⭐ Репутация: {p[5]}\n💰 Казна: {p[6]}\n\n"
+            f"<b>Обо мне:</b>\n"
+            f"📝 {p[15] or '—'}\n🤝 {p[12] or '—'}\n🛠 {p[13] or '—'}\n❤️ {p[14] or '—'}\n\n"
+            f"<b>Права:</b>\n{perm_lines}\n\n<b>Заметки админа:</b> {p[7] or '—'}",
+            chat_id=c.message.chat.id, message_id=c.message.message_id,
+            parse_mode='HTML', reply_markup=m)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "clan_list")
+def cb_clan_list(c):
+    bot.answer_callback_query(c.id)
+    players = all_players()
+    m = telebot.types.InlineKeyboardMarkup()
+    for p in players:
+        m.add(telebot.types.InlineKeyboardButton(f"{p[1]} ({p[4]})", callback_data=f"pinfo_{p[0]}"))
+    m.add(telebot.types.InlineKeyboardButton("⬅️ В меню", callback_data="menu"))
+    lines = [f"🏰 <b>{CLAN_NAME}</b> — {len(players)} игроков\n"]
+    for p in players:
+        lines.append(f"{'✅' if p[8] else '⏳'} {p[1]} — {p[4]} ⭐{p[5]}")
+    try:
+        bot.edit_message_text("\n".join(lines), chat_id=c.message.chat.id,
+            message_id=c.message.message_id, parse_mode='HTML', reply_markup=m)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pinfo_"))
+def cb_pinfo(c):
+    bot.answer_callback_query(c.id)
+    pid = int(c.data.split("_")[1])
+    c2 = get_conn(); cur = c2.cursor()
+    cur.execute("""SELECT game_nick, rank, reputation, treasury, notes, registered,
+        about_self, about_help, about_skills, about_likes FROM players WHERE id=?""", (pid,))
+    r = cur.fetchone(); c2.close()
+    if not r:
+        return
+    m = telebot.types.InlineKeyboardMarkup().add(telebot.types.InlineKeyboardButton("⬅️ Назад", callback_data="clan_list"))
+    try:
+        bot.edit_message_text(
+            f"👤 <b>{r[0]}</b>\n🎖 {r[1]}\n⭐ {r[2]}\n💰 {r[3]}\n"
+            f"{'✅ Зарегистрирован' if r[5] else '⏳ Не зарегистрирован'}\n\n"
+            f"<b>Обо мне:</b>\n"
+            f"📝 {r[6] or '—'}\n🤝 {r[7] or '—'}\n🛠 {r[8] or '—'}\n❤️ {r[9] or '—'}\n\n"
+            f"<b>Заметки:</b> {r[4] or '—'}",
+            chat_id=c.message.chat.id, message_id=c.message.message_id,
+            parse_mode='HTML', reply_markup=m)
+    except Exception:
+        pass
+
 
 # ============================================================
 # ИИ-МЕНЮ
@@ -924,7 +1039,6 @@ def cb_report_rej(c):
     except Exception:
         pass
     bot.send_message(c.message.chat.id, f"❌ Жалоба #{rid} отклонена.")
-
 
 # ============================================================
 # АДМИН-ПАНЕЛЬ
